@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-index.py — Build a BM25 index over the corpus.
 
-Usage:
-    python index.py --corpus ./corpus --output ./index.pkl
-
-Supports: .txt, .pdf, .md files
-"""
 
 import argparse
 import os
@@ -15,9 +8,6 @@ import re
 import sys
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Optional PDF support
-# ---------------------------------------------------------------------------
 try:
     import pdfplumber
     PDF_SUPPORT = True
@@ -36,9 +26,6 @@ except ImportError:
     from rank_bm25 import BM25Okapi
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def tokenize(text: str) -> list[str]:
     """Lowercase + split on non-alphanumeric characters."""
@@ -94,9 +81,7 @@ def chunk_text(text: str, doc_id: str, chunk_size: int = 800, overlap: int = 100
     return chunks
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+
 
 def build_index(corpus_dir: str, output_path: str, chunk_size: int = 800, overlap: int = 100):
     corpus_path = Path(corpus_dir)
