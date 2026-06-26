@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-query.py — Answer a natural-language question using BM25 retrieval + Claude.
+query.py — Answer a natural-language question using BM25 retrieval + Gemini.
 
 Usage:
-    python query.py --index ./index.pkl --question "What is the procurement threshold?"
-    python query.py --index ./index.pkl --question "..." --top-k 5 --model claude-haiku-4-5-20251001
+    python query.py --index ./index.pkl -q "What is the procurement threshold?"
+    python query.py --index ./index.pkl -q "..." --top-k 5
 
 Cost model:
     BM25 retrieval is free (local).
@@ -18,7 +18,6 @@ import pickle
 import re
 import sys
 import time
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # BM25
@@ -31,14 +30,14 @@ except ImportError:
     from rank_bm25 import BM25Okapi
 
 # ---------------------------------------------------------------------------
-# Anthropic
+# Google Gemini
 # ---------------------------------------------------------------------------
 try:
-    import anthropic
+    import google.generativeai as genai
 except ImportError:
     import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "anthropic", "-q"])
-    import anthropic
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "google-generativeai", "-q"])
+    import google.generativeai as genai
 
 
 # ---------------------------------------------------------------------------
@@ -54,20 +53,15 @@ def load_index(index_path: str) -> dict:
         return pickle.load(f)
 
 
-def retrieve(index_data: dict, question: str, top_k: int) -> list[dict]:
+def retrieve(index_data: dict, question: str, top_k: int) -> list:
     """BM25 retrieval — returns top_k chunks sorted by score."""
-    bm25: BM25Okapi = index_data["bm25"]
-    chunks: list[dict] = index_data["chunks"]
+    bm25 = index_data["bm25"]
+    chunks = index_data["chunks"]
     tokens = tokenize(question)
     scores = bm25.get_scores(tokens)
 
-    # Pair chunks with scores and sort
-    scored = sorted(
-        zip(scores, chunks),
-        key=lambda x: x[0],
-        reverse=True
-    )
-    # Deduplicate by doc_id — take best chunk per doc first, then fill up
+    scored = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
+
     seen_docs = {}
     results = []
     for score, chunk in scored:
@@ -78,15 +72,13 @@ def retrieve(index_data: dict, question: str, top_k: int) -> list[dict]:
         if len(results) >= top_k:
             break
 
-    return results  # list of (score, chunk)
+    return results
 
 
-def build_prompt(question: str, retrieved: list[tuple]) -> str:
+def build_prompt(question: str, retrieved: list) -> str:
     context_parts = []
     for i, (score, chunk) in enumerate(retrieved, 1):
-        context_parts.append(
-            f"[Document {i}: {chunk['doc_id']}]\n{chunk['text']}"
-        )
+        context_parts.append(f"[Document {i}: {chunk['doc_id']}]\n{chunk['text']}")
     context = "\n\n---\n\n".join(context_parts)
 
     return f"""You are a precise document Q&A assistant. Answer the question using ONLY the provided document excerpts.
@@ -107,16 +99,10 @@ QUESTION: {question}
 ANSWER:"""
 
 
-def estimate_tokens(text: str) -> int:
-    """Rough estimate: 1 token ≈ 4 characters."""
-    return len(text) // 4
-
-
 def answer_question(
     index_path: str,
     question: str,
     top_k: int = 5,
-    model: str = "claude-haiku-4-5-20251001",
     api_key: str = None,
     verbose: bool = False,
 ):
@@ -138,29 +124,38 @@ def answer_question(
 
     # Build prompt
     prompt = build_prompt(question, retrieved)
-    input_tokens_est = estimate_tokens(prompt)
 
     if verbose:
-        print(f"\nPrompt size: ~{input_tokens_est} tokens (estimated)")
+        print(f"\nPrompt size: ~{len(prompt)//4} tokens (estimated)")
+
+    # Setup Gemini
+    key = api_key or os.environ.get("GEMINI_API_KEY")
+    if not key:
+        print("ERROR: No API key found. Set GEMINI_API_KEY environment variable or pass --api-key")
+        sys.exit(1)
+
+    genai.configure(api_key=key)
+    model = genai.GenerativeModel("gemini-1.5-flash")
 
     # Call LLM
-    client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
     t2 = time.time()
-    message = client.messages.create(
-        model=model,
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    response = model.generate_content(prompt)
     t_llm = time.time() - t2
 
-    answer = message.content[0].text.strip()
-    input_tokens_actual = message.usage.input_tokens
-    output_tokens_actual = message.usage.output_tokens
-    total_tokens = input_tokens_actual + output_tokens_actual
+    answer = response.text.strip()
 
-    # Cost estimate (Haiku pricing as of 2025)
-    # claude-haiku-4-5: $0.80/M input, $4/M output
-    cost_usd = (input_tokens_actual * 0.80 + output_tokens_actual * 4.0) / 1_000_000
+    # Token usage
+    try:
+        input_tokens = response.usage_metadata.prompt_token_count
+        output_tokens = response.usage_metadata.candidates_token_count
+    except Exception:
+        input_tokens = len(prompt) // 4
+        output_tokens = len(answer) // 4
+
+    total_tokens = input_tokens + output_tokens
+
+    # Gemini 1.5 Flash pricing: ~$0.075/M input, $0.30/M output
+    cost_usd = (input_tokens * 0.075 + output_tokens * 0.30) / 1_000_000
 
     print(f"\n{'='*60}")
     print(f"QUESTION: {question}")
@@ -171,21 +166,21 @@ def answer_question(
     for i, (score, chunk) in enumerate(retrieved, 1):
         print(f"  {i}. {chunk['doc_id']}  (BM25 score: {score:.3f})")
     print(f"\nCost metrics:")
-    print(f"  Model:         {model}")
-    print(f"  Input tokens:  {input_tokens_actual}")
-    print(f"  Output tokens: {output_tokens_actual}")
-    print(f"  Total tokens:  {total_tokens}")
-    print(f"  Est. cost:     ${cost_usd:.6f}")
+    print(f"  Model:          gemini-1.5-flash")
+    print(f"  Input tokens:   {input_tokens}")
+    print(f"  Output tokens:  {output_tokens}")
+    print(f"  Total tokens:   {total_tokens}")
+    print(f"  Est. cost:      ${cost_usd:.6f}")
     print(f"  Retrieval time: {t_retrieve*1000:.1f}ms (BM25, local)")
-    print(f"  LLM time:      {t_llm:.2f}s")
+    print(f"  LLM time:       {t_llm:.2f}s")
     print(f"{'─'*60}")
 
     return {
         "question": question,
         "answer": answer,
         "sources": [c["doc_id"] for _, c in retrieved],
-        "input_tokens": input_tokens_actual,
-        "output_tokens": output_tokens_actual,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
         "cost_usd": cost_usd,
     }
 
@@ -195,16 +190,11 @@ def answer_question(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Query the BM25 document index with LLM answering.")
+    parser = argparse.ArgumentParser(description="Query the BM25 index using Gemini.")
     parser.add_argument("--index", default="./index.pkl", help="Path to index file")
     parser.add_argument("--question", "-q", required=True, help="Natural language question")
     parser.add_argument("--top-k", type=int, default=5, help="Number of chunks to retrieve (default 5)")
-    parser.add_argument(
-        "--model",
-        default="claude-haiku-4-5-20251001",
-        help="Anthropic model to use (default: claude-haiku-4-5-20251001 for lowest cost)",
-    )
-    parser.add_argument("--api-key", default=None, help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
+    parser.add_argument("--api-key", default=None, help="Gemini API key (or set GEMINI_API_KEY env var)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show retrieval details")
     args = parser.parse_args()
 
@@ -212,7 +202,9 @@ if __name__ == "__main__":
         index_path=args.index,
         question=args.question,
         top_k=args.top_k,
-        model=args.model,
         api_key=args.api_key,
         verbose=args.verbose,
     )
+ 
+
+    
