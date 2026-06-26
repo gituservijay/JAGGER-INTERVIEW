@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""
-query.py — Answer a natural-language question using BM25 retrieval + Gemini.
-
-Usage:
-    python query.py --index ./index.pkl -q "What is the procurement threshold?"
-    python query.py --index ./index.pkl -q "..." --top-k 5
-
-Cost model:
-    BM25 retrieval is free (local).
-    Only top-k chunks (~800 words each) are sent to the LLM.
-    Default top-k=5 → ~4000 words context per query ≈ comparable to a RAG query.
-"""
 
 import argparse
 import os
@@ -40,9 +28,7 @@ except ImportError:
     import google.generativeai as genai
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+
 
 def tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
@@ -83,14 +69,7 @@ def build_prompt(question: str, retrieved: list) -> str:
 
     return f"""You are a precise document Q&A assistant. Answer the question using ONLY the provided document excerpts.
 
-Rules:
-- If the answer is found, state it clearly and cite the source document(s) by name.
-- If the documents do not contain enough information to answer, say exactly: "UNANSWERABLE: The corpus does not contain sufficient information to answer this question."
-- Do not hallucinate or use outside knowledge.
-- Keep your answer concise and factual.
 
----
-DOCUMENTS:
 {context}
 
 ---
@@ -185,9 +164,6 @@ def answer_question(
     }
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Query the BM25 index using Gemini.")
